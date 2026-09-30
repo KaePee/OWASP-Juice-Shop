@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+
+APP_DIR="${JUICE_SHOP_DIR:-$HOME/juice-shop}"
+CONTAINER="juice-shop"
+PID_FILE="$APP_DIR/.juice-shop.pid"
+stopped=0
+
+info() { printf '%s\n' "$*"; }
+
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+	state="$(docker inspect --format '{{.State.Running}}' "$CONTAINER" 2>/dev/null || true)"
+	if [[ "$state" == "true" ]]; then
+		info "Stopping the Juice Shop Docker container..."
+		docker stop "$CONTAINER" >/dev/null
+		info "Juice Shop Docker container stopped."
+		stopped=1
+	fi
+fi
+
+if [[ -f "$PID_FILE" ]]; then
+	pid="$(<"$PID_FILE")"
+	if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+		info "Stopping Juice Shop source process (PID $pid)..."
+		kill -TERM "$pid"
+		for ((attempt = 0; attempt < 20; attempt++)); do
+			if ! kill -0 "$pid" 2>/dev/null; then
+				break
+			fi
+			sleep 1
+		done
+		if kill -0 "$pid" 2>/dev/null; then
+			info "Process did not exit after SIGTERM; sending SIGKILL."
+			kill -KILL "$pid" 2>/dev/null || true
+		fi
+		info "Juice Shop source process stopped."
+		stopped=1
+	fi
+	rm -f "$PID_FILE"
+fi
+
+if [[ "$stopped" -eq 0 ]]; then
+	info "Juice Shop is not running (no managed Docker container or source PID was found)."
+fi

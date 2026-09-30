@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+
+APP_DIR="${JUICE_SHOP_DIR:-$HOME/juice-shop}"
+IMAGE="bkimminich/juice-shop:latest"
+CONTAINER="juice-shop"
+URL="http://localhost:3000"
+PID_FILE="$APP_DIR/.juice-shop.pid"
+LOG_FILE="$APP_DIR/juice-shop.log"
+NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+
+info() { printf '%s\n' "$*"; }
+error() { printf '[ERROR] %s\n' "$*" >&2; }
+
+open_browser() {
+	if command -v open >/dev/null 2>&1; then
+		open "$URL" >/dev/null 2>&1 || true
+	elif command -v xdg-open >/dev/null 2>&1; then
+		xdg-open "$URL" >/dev/null 2>&1 || true
+	fi
+}
+
+wait_for_server() {
+	local attempt
+	if ! command -v curl >/dev/null 2>&1; then
+		return 0
+	fi
+	for ((attempt = 0; attempt < 60; attempt++)); do
+		if curl --silent --fail --max-time 2 "$URL" >/dev/null; then
+			return 0
+		fi
+		sleep 1
+	done
+	return 1
+}
+
+start_docker() {
+	local state
+	state="$(docker inspect --format '{{.State.Running}}' "$CONTAINER" 2>/dev/null || true)"
+	if [[ "$state" == "true" ]]; then
+		info "Juice Shop is already running in Docker."
+	elif [[ "$state" == "false" ]]; then
+		info "Starting the existing Juice Shop Docker container..."
+		docker start "$CONTAINER" >/dev/null
+	else
+		info "Starting Juice Shop in Docker..."
+		docker run --detach --rm --name "$CONTAINER" -p 127.0.0.1:3000:3000 "$IMAGE" >/dev/null
+	fi
+
+	if wait_for_server; then
+		info "Juice Shop is ready at $URL"
+	else
+		info "Juice Shop is still starting. Check its output with: docker logs -f $CONTAINER"
+	fi
+	open_browser
+	info "Stop it with: juice-shop-stop"
+}
+
+start_source() {
+	local pid
+	if [[ ! -d "$APP_DIR" || ! -f "$APP_DIR/package.json" ]]; then
+		error "Source installation not found at $APP_DIR. Run install_juice-shop.sh first or set JUICE_SHOP_DIR."
+		return 1
+	fi
+	if [[ ! -d "$APP_DIR/node_modules" ]]; then
+		error "npm dependencies are missing. Run install_juice-shop.sh again."
+		return 1
+	fi
+
+	if [[ -f "$PID_FILE" ]]; then
+		pid="$(<"$PID_FILE")"
+		if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+			info "Juice Shop is already running (PID $pid)."
+			open_browser
+			return
+		fi
+		rm -f "$PID_FILE"
+	fi
+
+	if command -v curl >/dev/null 2>&1 && curl --silent --fail --max-time 2 "$URL" >/dev/null; then
+		error "A service is already responding at $URL; refusing to start a duplicate."
+		return 1
+	fi
+
+	if [[ -s "$NVM_DIR/nvm.sh" ]]; then
+		# shellcheck disable=SC1090
+		. "$NVM_DIR/nvm.sh"
+		nvm use --silent default >/dev/null 2>&1 || true
+	fi
+	if ! command -v npm >/dev/null 2>&1; then
+		error "npm is not available. Run install_juice-shop.sh again to set up Node.js."
+		return 1
+	fi
+
+	info "Starting Juice Shop from $APP_DIR..."
+	cd "$APP_DIR"
+	nohup npm start >"$LOG_FILE" 2>&1 </dev/null &
+	pid=$!
+	printf '%s\n' "$pid" >"$PID_FILE"
+	if wait_for_server; then
+		info "Juice Shop is ready at $URL"
+	else
+		if ! kill -0 "$pid" 2>/dev/null; then
+			rm -f "$PID_FILE"
+			error "Juice Shop exited during startup. Recent output:"
+			tail -n 30 "$LOG_FILE" >&2 || true
+			return 1
+		fi
+		info "Juice Shop is still starting. Output is being written to $LOG_FILE"
+	fi
+	open_browser
+	info "Stop it with: juice-shop-stop"
+}
+
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 && docker image inspect "$IMAGE" >/dev/null 2>&1; then
+	start_docker
+else
+	start_source
+fi
